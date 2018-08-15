@@ -1,23 +1,23 @@
 import argparse
 import os
 import numpy as np
-# np.random.seed(0)
+np.random.seed(0)
 import tensorflow as tf
-# tf.set_random_seed(0)
+tf.set_random_seed(0)
 from sklearn.model_selection import KFold
 
 import pickle
 import copy
 
-from  myutils import collect_data_infor_from_tsv, load_word_embeddings
+from  utils import collect_data_infor_from_tsv, load_word_embeddings
 
 from config import ModelConfig
-from features2 import WordPOSPreprocessor
+from features import WordPreprocessor
 
 from evaluation import ATEPCEvaluator, ATEPCNewEvaluator
 
 
-from context_attention2 import AspectLSTM
+from matepc import MATEPC
 
 import time
 
@@ -45,10 +45,8 @@ def train_step(sess, model, model_config, data, data_type):
     for train_index, valid_index in minibatch_fold.split(Y_train):
         feed_dict = {
             model.input_word_indices:       X_train[0][valid_index],
-            model.input_pos_indices:        X_train[1][valid_index],
-            model.input_mask:               X_train[3][valid_index],
+            model.input_mask:               X_train[1][valid_index],
             model.input_sequence_length:    X_train[2][valid_index],
-            model.input_punc_mask:          X_train[4][valid_index],
             model.output_label_indices:     Y_train[valid_index],
             model.dropout_keep_prob:        0.5
         }
@@ -128,22 +126,14 @@ def predict_step(sess, model, p, data, data_type, crf_transition_parameters):
     for i in range(Y.shape[0]):
         feed_dict = {
             model.input_word_indices:  X[0][i:i+1,:],
-            model.input_pos_indices: X[1][i:i+1],
-            model.input_mask: X[3][i:i+1],
+            model.input_mask: X[1][i:i+1],
             model.input_sequence_length: X[2][i:i+1],
-            model.input_punc_mask: X[4][i:i+1],
             model.output_label_indices: Y[i:i+1],
             model.dropout_keep_prob: 1.0
         }
         unary_scores, loss = sess.run([model.unary_scores, model.loss], feed_dict)
         losses.append(loss)
-        # print(unary_scores.shape)
-        # print(unary_scores[0].shape)
-        # print(X[0][i:i+1,:])
-        # print(X[2][i])
         unary_scores_i = unary_scores[0][:X[2][i],:]
-        # print(unary_scores_i.shape)
-
         y_pred, _ = tf.contrib.crf.viterbi_decode(unary_scores_i, crf_transition_parameters)
         y_true = list(Y[i][:X[2][i]])
 
@@ -157,25 +147,6 @@ def predict_step(sess, model, p, data, data_type, crf_transition_parameters):
     losses_avg = np.mean(losses)
     return f1, ys_pred, ys_true, losses_avg
 
-
-def save_result(result, i = -1):
-    results = load_result()
-    if results is None:
-        results = []
-    if i == -1:
-        results.append(result)
-    else:
-        results[i] = result
-    with open("logs/resultfinal.pickle", "wb") as f:
-        pickle.dump(results, f)
-
-def load_result():
-    if os.path.isfile("logs/resultfinal.pickle") is False:
-        return None
-    with open("logs/resultfinal.pickle", "rb") as f:
-        return pickle.load(f)
-
-
 def write_result(fo_path, sents, ys_true, ys_pred):
     with open(fo_path, mode="w") as f:
         for sent, y_true, y_pred in zip(sents, ys_true, ys_pred):
@@ -184,14 +155,19 @@ def write_result(fo_path, sents, ys_true, ys_pred):
                 f.write("{0}\t{1}\t{2}\n".format(word, y_t, y_p))
             f.write("\n")
 
-def train_model(keras_model_name= "WP", data_name="laptops", task_name="ATEPC2", hand_features = None, params_str = "w2v,100,100,100,20,0.0010", attention_status = "Attention_Before_LSTM"):
+def train_model(data_name="laptops", task_name="ATEPC", params_str = "w2v,150,200,20,0.0010,20,0.001"):
     DATA_ROOT = os.getcwd() + '/data'
     SAVE_ROOT = os.getcwd() + '/models'  # trained models
-    LOG_ROOT = os.getcwd() + '/logs'  # checkpoint, tensorboard
+    LOG_ROOT = os.getcwd() + '/logs'
 
-    print("-----{0}-----{1}-----{2}-----{3}-----{4}".format(task_name, data_name, keras_model_name, hand_features, params_str))
+    print("-----{0}-----{1}-----{2}-----".format(task_name, data_name, params_str))
+
     # ----- create save directory -----
     save_path = SAVE_ROOT + "/{0}/{1}".format(data_name, task_name)
+    if not os.path.exists(SAVE_ROOT):
+        os.makedirs(SAVE_ROOT)
+    if not os.path.exists(LOG_ROOT):
+        os.makedirs(LOG_ROOT)
     if not os.path.exists(SAVE_ROOT + "/{0}".format(data_name)):
         os.makedirs(SAVE_ROOT + "/{0}".format(data_name))
     if not os.path.exists(save_path):
@@ -203,101 +179,111 @@ def train_model(keras_model_name= "WP", data_name="laptops", task_name="ATEPC2",
     test_path = os.path.join(DATA_ROOT, '{0}.{1}.test.tsv'.format(data_name, task_name))
     # train set
     if task_name == "ATE":
-        sents1, poses1, dep_idxs1, dep_relations1, labels1, preds1 = collect_data_infor_from_tsv(train_path, keep_conflict=True)
+        sents1, _, _, _, labels1, preds1 = collect_data_infor_from_tsv(train_path, keep_conflict=True)
     else:
-        sents1, poses1, dep_idxs1, dep_relations1, labels1, preds1 = collect_data_infor_from_tsv(train_path, keep_conflict=False)
+        sents1, _, _, _, labels1, preds1 = collect_data_infor_from_tsv(train_path, keep_conflict=False)
     X1_train_valid = sents1
-    X2_train_valid = np.asarray(list(zip(poses1, dep_idxs1, dep_relations1)))
     Y_train_valid = labels1
     # test set
-    sents2, poses2, dep_idxs2, dep_relations2, labels2, preds2 = collect_data_infor_from_tsv(test_path, keep_conflict=True)
+    sents2, _, _, _, labels2, preds2 = collect_data_infor_from_tsv(test_path, keep_conflict=True)
     X1_test = sents2
-    X2_test = np.asarray(list(zip(poses2, dep_idxs2, dep_relations2)))
     Y_test_origin = labels2
     # train + test for counting vocab size
     X1_train_test = np.concatenate((X1_train_valid, X1_test), axis=0)
-    X2_train_test = np.concatenate((X2_train_valid, X2_test), axis=0)
     Y_train_test = np.concatenate((Y_train_valid, Y_test_origin), axis=0)
 
     # ----- Model Config
     model_config = ModelConfig()
-    model_config.attention_status = attention_status
-    model_config.learning_feature = keras_model_name
     model_config.adjust_params_follow_paramstr(params_str)
-    p = WordPOSPreprocessor()
-    p.fit(X1=X1_train_test, X2=X2_train_test, Y=Y_train_test)
+    p = WordPreprocessor()
+    p.fit(X1=X1_train_test, Y=Y_train_test)
     model_config.adjust_params_follow_preprocessor(p)
     print(p.vocab_tag)
 
     # ----- Embedding loading -----
-    w_embedding_path = '/home/s1610434/Documents/Data/Vector/{0}/{0}.word.{1}.txt'.format(model_config.embedding_name, model_config.word_embedding_size)
-    pos_embedding_path = '/home/s1610434/Documents/Data/Vector/{0}/{0}.pos.{1}.txt'.format(model_config.embedding_name,model_config.pos_embedding_size)
+    w_embedding_path = 'models/{0}.word.{1}.txt'.format(model_config.embedding_name, model_config.word_embedding_size)
     W_embedding = load_word_embeddings(p.vocab_word, w_embedding_path, model_config.word_embedding_size)
-    POS_embedding = load_word_embeddings(p.pos_extractor.features_dict, pos_embedding_path, model_config.pos_embedding_size)
-
     print(W_embedding.shape)
-    print(POS_embedding.shape)
 
     # for evaluation 2 tasks
     atepc_evaluator = ATEPCNewEvaluator()
-    atepc_results = []
 
 
-    for i_fold in range(10):
-        hand_features_str = ",".join(hand_features) if hand_features is not None else "None"
-        model_name = "{0}.{1}.{2}".format(keras_model_name,hand_features_str, params_str)
+    kf = KFold(n_splits=10, shuffle=True)
+    i_fold = 0
+    model_name = params_str
+
+    results = []
+    X_test, Y_test = p.transform(X1=X1_test, Y=Y_test_origin)
+    for train_index, valid_index in kf.split(X1_train_valid):
         model_name_ifold = model_name + "." + str(i_fold)
+        # create data
+        X1_train_ori, X1_valid_ori = X1_train_valid[train_index], X1_train_valid[valid_index]
+        Y_train_ori, Y_valid_ori = Y_train_valid[train_index], Y_train_valid[valid_index]
 
-        p.load(os.path.join(save_path,model_name_ifold))
-        X_test, Y_test = p.transform(X1=X1_test, X2=X2_test, Y=Y_test_origin)
-        X_train, Y_train = p.transform(X1=X1_train_valid, X2=X2_train_valid, Y=Y_train_valid)
-        X_valid, Y_valid = p.transform(X1=X1_train_valid, X2=X2_train_valid, Y=Y_train_valid)
+        X_train, Y_train = p.transform(X1=X1_train_ori, Y=Y_train_ori)
+        X_valid, Y_valid = p.transform(X1=X1_valid_ori, Y=Y_valid_ori)
         data = create_data_object(X_train, Y_train, X_valid, Y_valid, X_test, Y_test)
+        # data = create_data_object(copy.deepcopy(X_valid), copy.deepcopy(Y_valid), X_valid , Y_valid, X_test, Y_test)
+        f1_valid_best = -1.0
+        patient_i = model_config.patience
 
         sess = tf.Session()
         with sess.as_default():
             # tensorflow model
-            model = AspectLSTM(config=model_config)
+            model = MATEPC(config=model_config)
+            sess.run(tf.global_variables_initializer())
+            model.load_word_embedding(sess, initial_weights=W_embedding)
+
+            for epoch_i in range(model_config.max_epoch):
+                train_start = int(time.time())
+                crf_transition_parameters, loss_train = train_step(sess, model, model_config, data, "train")
+                train_end = int(time.time())
+                valid_start = int(time.time())
+                f1_valid, ys_pred_valid, ys_true_valid, loss_valid= predict_step(sess, model, p, data, "valid", crf_transition_parameters)
+                f1_test, ys_pred_test, ys_true_test, loss_test = predict_step(sess, model, p, data, "test",
+                                                                    crf_transition_parameters)
+                ate_f1_valid, apc_acc_valid = atepc_evaluator.evaluate(ys_true_valid, ys_pred_valid, verbose=False)
+                ate_f1_test, apc_acc_test = atepc_evaluator.evaluate(ys_true_test, ys_pred_test, verbose=False)
+                valid_end = int(time.time())
+                if f1_valid > f1_valid_best:
+                    patient_i = model_config.patience
+                    f1_valid_best = f1_valid
+                    model.saver.save(sess, save_path=os.path.join(save_path,model_name_ifold))
+                    p.save(file_path=os.path.join(save_path,model_name_ifold))
+                    print("Epoch {0}. Training/valid loss: {1:.4f}/{6:.4f}. Validation f1: {2:.2f}. Time(train/valid): ({4}/{5})s .Patience: {3}. __BEST__, ({7},{8}), ({9}/{10})".format(epoch_i, loss_train, f1_valid * 100, patient_i, train_end-train_start, valid_end-valid_start, loss_valid, ate_f1_valid, apc_acc_valid, ate_f1_test, apc_acc_test))
+                else:
+                    print("Epoch {0}. Training/valid loss: {1:.4f}/{6:.4f}. Validation f1: {2:.2f}. Time(train/valid): ({4}/{5})s .Patience: {3}.         , ({7},{8}), ({9}/{10})".format(epoch_i, loss_train, f1_valid * 100, patient_i, train_end-train_start, valid_end-valid_start, loss_valid, ate_f1_valid, apc_acc_valid, ate_f1_test, apc_acc_test))
+                    patient_i -= 1
+                    if patient_i < 0:
+                        break
+
             model.saver.restore(sess, save_path=os.path.join(save_path,model_name_ifold))
             crf_transition_parameters = sess.run(model.crf_transition_parameters)
-            # f1_valid, _, _, loss_valid = predict_step(sess, model, p, data, "valid", crf_transition_parameters)
+            f1_valid, _, _, loss_valid = predict_step(sess, model, p, data, "valid", crf_transition_parameters)
             f1_test, ys_pred, ys_true, loss_test = predict_step(sess, model, p, data, "test", crf_transition_parameters)
             print("F1 test, ATEPC task: ", f1_test)
             f1, acc = atepc_evaluator.evaluate(ys_true, ys_pred, verbose=True)
-            with open("logs/{0}.{1}.result.pickle".format(data_name,model_name_ifold), mode="wb") as f:
-                pickle.dump((X1_test, ys_true, ys_pred, f1, acc), f)
+            results.append([f1_valid, f1, acc])
+            write_result(os.path.join(LOG_ROOT,model_name_ifold+".txt"), sents2, ys_true, ys_pred)
 
-            # write_result("logs/{0}.txt".format(model_name_ifold), X1_test, ys_true, ys_pred)
         tf.reset_default_graph()
+        i_fold+=1
         print("-----",i_fold,"-----")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('-kr_name', type=str, default="W", help='keras_model_name')
-    parser.add_argument('-task_name', type=str, default="ATEPC2", help='task_name')
-    parser.add_argument('-data_name', type=str, default="restaurants16", help='data_name')
-    parser.add_argument('-hand_features', type=str, default=None, help='hand_features')
-    parser.add_argument('-params_str', type=str, default="w2v,150,050,200,20,0.0010,30,0.000,0", help='parameters')
-    parser.add_argument('-attention_status', type=str, default="Without_Attention", help='attention_status')
+    parser.add_argument('-task_name', type=str, default="ATEPC", help='task_name')
+    parser.add_argument('-data_name', type=str, default="laptops", help='data_name')
+    parser.add_argument('-params_str', type=str, default="w2v,150,200,20,0.0010,30,0.000", help='parameters')
     args = parser.parse_args()
 
-    kr_names = ["WCH1", "WCH2", "WH1", "WH2", "WH", "WCH", "WC", "W", "WCP", "WP", "WPH", "WCPH", "WPD", "WPHD", "WPH1",
-                "WPH2", "WPH3"]
-    data_names = ["laptops", "restaurants", "restaurants15", "restaurants16"]
-
-    if args.hand_features is None:
-        hand_features = None
-    else:
-        hand_features = args.hand_features.split(",")
+    data_names = ["laptops", "restaurants"]
 
     params_str = args.params_str.strip()
-    if args.kr_name in kr_names and args.data_name in data_names:
-        train_model(keras_model_name=args.kr_name, data_name=args.data_name, hand_features=hand_features,
-                    params_str=params_str, task_name=args.task_name, attention_status=args.attention_status)
-    else:
-        print("Wrong parameter, please choose params from these lists: ")
-        print("-kr_name", kr_names)
-        print("-data_name", data_names)
+    train_model(data_name=args.data_name, params_str=params_str, task_name=args.task_name)
+
+
 
 

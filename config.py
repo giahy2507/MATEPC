@@ -49,8 +49,6 @@ class ModelConfig(object):
         # gradiend_clipvalue
         self.gradient_clipping_value = 5.0
 
-
-
     def parse_params(self, params_str="w2v,150,200,20,0.0010,20,0.001"):
         result = {}
         tokens = params_str.split(",")
