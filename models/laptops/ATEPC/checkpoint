@@ -1,0 +1,2 @@
+model_checkpoint_path: "C:\\hynguyen\\SA\\a-joint-model-of-term-extraction-and-polarity-classification-for-absa/models/laptops/ATEPC\\w2v,150,200,20,0.0010,30,0.000.0"
+all_model_checkpoint_paths: "C:\\hynguyen\\SA\\a-joint-model-of-term-extraction-and-polarity-classification-for-absa/models/laptops/ATEPC\\w2v,150,200,20,0.0010,30,0.000.0"
